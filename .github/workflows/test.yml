@@ -47,10 +47,11 @@ jobs:
           yamllint -d relaxed .github/workflows/test.yml
           echo "✅ YAML lint passed"
 
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
+
       - name: Validate action.yml schema (actionlint)
-        uses: rhysd/actionlint@v1
-        with:
-          files: action.yml .github/workflows/test.yml
+        run: actionlint action.yml .github/workflows/test.yml
 
   # ── Job 2: Build-only matrix ─────────────────────────────────────────────────
   build:
