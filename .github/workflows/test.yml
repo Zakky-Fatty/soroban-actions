@@ -50,8 +50,10 @@ jobs:
       - name: Install and run actionlint
         run: |
           go install github.com/rhysd/actionlint/cmd/actionlint@latest
-          export PATH="$PATH:$(go env GOPATH)/bin"
-          actionlint action.yml .github/workflows/test.yml
+          GOPATH_BIN="$(go env GOPATH)/bin"
+          export PATH="$PATH:$GOPATH_BIN"
+          # actionlint validates workflow files only — NOT action.yml definitions
+          actionlint .github/workflows/test.yml
 
   # ── Job 2: Build-only matrix ─────────────────────────────────────────────────
   build:
