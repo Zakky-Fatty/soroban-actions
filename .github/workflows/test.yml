@@ -47,11 +47,11 @@ jobs:
           yamllint -d relaxed .github/workflows/test.yml
           echo "✅ YAML lint passed"
 
-      - name: Install actionlint
-        run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
-
-      - name: Validate action.yml schema (actionlint)
-        run: actionlint action.yml .github/workflows/test.yml
+      - name: Install and run actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@latest
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          actionlint action.yml .github/workflows/test.yml
 
   # ── Job 2: Build-only matrix ─────────────────────────────────────────────────
   build:
