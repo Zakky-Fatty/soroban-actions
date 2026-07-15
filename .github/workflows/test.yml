@@ -1,0 +1,151 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# test.yml
+# Dogfood CI – validates the soroban-actions composite action against the
+# dummy-contract bundled in this same repository.
+#
+# Matrix strategy covers:
+#   • OS:           ubuntu-latest (primary) + macos-latest (spot-check)
+#   • CLI version:  latest
+#   • Steps:        build-only  |  build+test  |  build+test+simulate-deploy
+# ──────────────────────────────────────────────────────────────────────────────
+name: "🧪 Soroban Actions – Dogfood CI"
+
+on:
+  push:
+    branches: ["main", "dev"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      stellar-cli-version:
+        description: "Override Stellar CLI version (default: latest)"
+        required: false
+        default: "latest"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Job 1: Lint YAML & action.yml ────────────────────────────────────────────
+  lint:
+    name: "🔍 Lint YAML / action.yml"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install yamllint --quiet
+
+      - name: Lint all YAML files
+        run: |
+          yamllint -d relaxed action.yml
+          yamllint -d relaxed .github/workflows/test.yml
+          echo "✅ YAML lint passed"
+
+      - name: Validate action.yml schema (actionlint)
+        uses: rhysd/actionlint@v1
+        with:
+          files: action.yml .github/workflows/test.yml
+
+  # ── Job 2: Build-only matrix ─────────────────────────────────────────────────
+  build:
+    name: "🔨 Build (${{ matrix.os }})"
+    needs: lint
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: "Run soroban-actions (build only)"
+        uses: ./                              # ← dogfoods THIS repo's action
+        with:
+          stellar-cli-version: ${{ github.event.inputs.stellar-cli-version || 'latest' }}
+          contract-path: dummy-contract
+          run-build: "true"
+          run-tests: "false"
+          run-deploy: "false"
+
+      - name: Upload optimised .wasm artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dummy-contract-wasm-${{ matrix.os }}
+          path: dummy-contract/target/wasm32-unknown-unknown/release/*-opt.wasm
+          retention-days: 7
+
+  # ── Job 3: Full pipeline (build + test) ──────────────────────────────────────
+  test:
+    name: "🧪 Build + Test (ubuntu-latest)"
+    needs: lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: "Run soroban-actions (build + test)"
+        uses: ./
+        with:
+          stellar-cli-version: ${{ github.event.inputs.stellar-cli-version || 'latest' }}
+          contract-path: dummy-contract
+          run-build: "true"
+          run-tests: "true"
+          run-deploy: "false"
+
+  # ── Job 4: Simulate deploy ────────────────────────────────────────────────────
+  simulate-deploy:
+    name: "🚀 Simulate Testnet Deploy"
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    # Protect the secret – only run on pushes to main / workflow_dispatch
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: "Run soroban-actions (full pipeline + simulate deploy)"
+        id: soroban
+        uses: ./
+        with:
+          stellar-cli-version: ${{ github.event.inputs.stellar-cli-version || 'latest' }}
+          contract-path: dummy-contract
+          run-build: "true"
+          run-tests: "true"
+          run-deploy: "true"
+          deploy-source-account: ${{ secrets.STELLAR_SOURCE_ACCOUNT }}
+          deploy-network: testnet
+          deploy-rpc-url: "https://soroban-testnet.stellar.org"
+
+      - name: "Print action outputs"
+        run: |
+          echo "Optimised wasm: ${{ steps.soroban.outputs.wasm-path }}"
+          echo "Simulate TX ID: ${{ steps.soroban.outputs.deploy-tx-id }}"
+
+  # ── Job 5: Required status check ─────────────────────────────────────────────
+  ci-gate:
+    name: "✅ CI Gate"
+    needs: [lint, build, test]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all required jobs passed
+        run: |
+          if [[ "${{ needs.lint.result }}"  != "success" ]] || \
+             [[ "${{ needs.build.result }}" != "success" ]] || \
+             [[ "${{ needs.test.result }}"  != "success" ]]; then
+            echo "::error::One or more required CI jobs failed."
+            exit 1
+          fi
+          echo "🎉 All required CI jobs passed."

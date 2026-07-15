@@ -1,0 +1,269 @@
+name: "Soroban Contract Actions"
+description: >
+  A composite GitHub Action that automates the full Soroban smart-contract
+  lifecycle: CLI installation, build, test, and optional Testnet deployment.
+
+author: "Alhaji-naira"
+
+branding:
+  icon: "zap"
+  color: "purple"
+
+# ──────────────────────────────────────────────────────────
+# INPUTS
+# ──────────────────────────────────────────────────────────
+inputs:
+  # ── CLI ──────────────────────────────────────────────────
+  stellar-cli-version:
+    description: >
+      Version of the Stellar CLI (stellar-cli) to install.
+      Accepts any cargo-installable version string, e.g. "21.3.1",
+      or "latest" to always pull the newest release.
+    required: false
+    default: "latest"
+
+  # ── Rust / Wasm ───────────────────────────────────────────
+  rust-toolchain:
+    description: >
+      Rust toolchain to use (passed straight to dtolnay/rust-toolchain).
+      Defaults to "stable".
+    required: false
+    default: "stable"
+
+  contract-path:
+    description: >
+      Path to the Rust workspace / crate root containing Cargo.toml.
+      Defaults to the repository root.
+    required: false
+    default: "."
+
+  # ── Steps to enable ───────────────────────────────────────
+  run-build:
+    description: "Set to 'true' to compile and wasm-opt the contract."
+    required: false
+    default: "true"
+
+  run-tests:
+    description: "Set to 'true' to execute cargo test."
+    required: false
+    default: "true"
+
+  # ── Deployment ────────────────────────────────────────────
+  run-deploy:
+    description: >
+      Set to 'true' to simulate deployment of the .wasm binary to
+      Stellar Testnet via `stellar contract deploy --simulate-only`.
+    required: false
+    default: "false"
+
+  deploy-network:
+    description: "Network to deploy to. Defaults to 'testnet'."
+    required: false
+    default: "testnet"
+
+  deploy-source-account:
+    description: >
+      Stellar source account alias or secret key used for deployment.
+      Required when run-deploy is 'true'.
+    required: false
+    default: ""
+
+  deploy-network-passphrase:
+    description: >
+      Network passphrase. Leave blank to use the built-in testnet passphrase.
+    required: false
+    default: "Test SDF Network ; September 2015"
+
+  deploy-rpc-url:
+    description: >
+      Horizon / RPC URL. Defaults to the public Testnet Horizon.
+    required: false
+    default: "https://soroban-testnet.stellar.org"
+
+  # ── Caching ───────────────────────────────────────────────
+  cache-cargo:
+    description: "Cache the Cargo registry and build artefacts."
+    required: false
+    default: "true"
+
+# ──────────────────────────────────────────────────────────
+# OUTPUTS
+# ──────────────────────────────────────────────────────────
+outputs:
+  wasm-path:
+    description: "Relative path to the optimised .wasm binary produced by the build step."
+    value: ${{ steps.locate-wasm.outputs.wasm-path }}
+
+  deploy-tx-id:
+    description: "Transaction ID returned by the Testnet deployment step (if run-deploy is true)."
+    value: ${{ steps.deploy.outputs.tx-id }}
+
+# ──────────────────────────────────────────────────────────
+# COMPOSITE STEPS
+# ──────────────────────────────────────────────────────────
+runs:
+  using: "composite"
+  steps:
+
+    # ── 1. Rust toolchain ──────────────────────────────────
+    - name: "🦀 Install Rust toolchain"
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.rust-toolchain }}
+        targets: wasm32-unknown-unknown
+        components: clippy,rustfmt
+
+    # ── 2. Cargo cache ────────────────────────────────────
+    - name: "📦 Cache Cargo registry & build artefacts"
+      if: inputs.cache-cargo == 'true'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          ${{ inputs.contract-path }}/target/
+        key: cargo-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ hashFiles(format('{0}/**/Cargo.lock', inputs.contract-path)) }}
+        restore-keys: |
+          cargo-${{ runner.os }}-${{ inputs.rust-toolchain }}-
+
+    # ── 3. Install Stellar CLI ────────────────────────────
+    - name: "🌟 Install Stellar CLI"
+      shell: bash
+      env:
+        CLI_VERSION: ${{ inputs.stellar-cli-version }}
+      run: |
+        set -euo pipefail
+
+        echo "::group::Installing Stellar CLI (${CLI_VERSION})"
+
+        if [[ "${CLI_VERSION}" == "latest" ]]; then
+          echo "Resolving latest Stellar CLI version..."
+          RESOLVED=$(curl -fsSL https://api.github.com/repos/stellar/stellar-cli/releases/latest \
+            | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
+          echo "Resolved version: ${RESOLVED}"
+          CLI_VERSION="${RESOLVED}"
+        fi
+
+        # Install only if not already present at the correct version
+        if stellar --version 2>/dev/null | grep -q "${CLI_VERSION}"; then
+          echo "Stellar CLI ${CLI_VERSION} already installed, skipping."
+        else
+          cargo install stellar-cli \
+            --version "${CLI_VERSION}" \
+            --features opt \
+            --locked \
+            --quiet
+        fi
+
+        stellar --version
+        echo "::endgroup::"
+
+    # ── 4. Install wasm-opt ───────────────────────────────
+    - name: "⚙️ Install wasm-opt"
+      if: inputs.run-build == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Installing wasm-opt (binaryen)"
+        if ! command -v wasm-opt &>/dev/null; then
+          cargo install wasm-opt --quiet --locked
+        fi
+        wasm-opt --version
+        echo "::endgroup::"
+
+    # ── 5. Build contract ─────────────────────────────────
+    - name: "🔨 Build Soroban contract (wasm32)"
+      if: inputs.run-build == 'true'
+      shell: bash
+      working-directory: ${{ inputs.contract-path }}
+      run: |
+        set -euo pipefail
+        echo "::group::cargo build --target wasm32-unknown-unknown --release"
+        cargo build --target wasm32-unknown-unknown --release
+        echo "::endgroup::"
+
+    # ── 6. Optimise wasm ──────────────────────────────────
+    - name: "✨ Optimise .wasm with wasm-opt"
+      if: inputs.run-build == 'true'
+      id: locate-wasm
+      shell: bash
+      working-directory: ${{ inputs.contract-path }}
+      run: |
+        set -euo pipefail
+        echo "::group::Optimising wasm binary"
+
+        # Find all .wasm files produced by the build
+        WASM_FILES=$(find target/wasm32-unknown-unknown/release -maxdepth 1 \
+          -name "*.wasm" ! -name "*-opt.wasm" | sort)
+
+        if [[ -z "${WASM_FILES}" ]]; then
+          echo "::error::No .wasm files found under target/wasm32-unknown-unknown/release"
+          exit 1
+        fi
+
+        for WASM in ${WASM_FILES}; do
+          OPT_WASM="${WASM%.wasm}-opt.wasm"
+          echo "Optimising: ${WASM} → ${OPT_WASM}"
+          wasm-opt -Os --strip-debug --strip-producers \
+            "${WASM}" -o "${OPT_WASM}"
+          echo "Sizes: $(du -h "${WASM}" | cut -f1) → $(du -h "${OPT_WASM}" | cut -f1)"
+        done
+
+        # Expose the last optimised wasm path as an output
+        LAST_OPT=$(find target/wasm32-unknown-unknown/release -maxdepth 1 \
+          -name "*-opt.wasm" | sort | tail -1)
+        echo "wasm-path=${LAST_OPT}" >> "${GITHUB_OUTPUT}"
+        echo "Final optimised wasm: ${LAST_OPT}"
+        echo "::endgroup::"
+
+    # ── 7. Run unit tests ─────────────────────────────────
+    - name: "🧪 Run cargo tests"
+      if: inputs.run-tests == 'true'
+      shell: bash
+      working-directory: ${{ inputs.contract-path }}
+      env:
+        RUST_BACKTRACE: "1"
+      run: |
+        set -euo pipefail
+        echo "::group::cargo test"
+        cargo test --workspace --all-features -- --nocapture
+        echo "::endgroup::"
+
+    # ── 8. Deploy (simulate) ──────────────────────────────
+    - name: "🚀 Deploy contract to Testnet (simulated)"
+      if: inputs.run-deploy == 'true'
+      id: deploy
+      shell: bash
+      working-directory: ${{ inputs.contract-path }}
+      env:
+        SOURCE_ACCOUNT: ${{ inputs.deploy-source-account }}
+        NETWORK:         ${{ inputs.deploy-network }}
+        PASSPHRASE:      ${{ inputs.deploy-network-passphrase }}
+        RPC_URL:         ${{ inputs.deploy-rpc-url }}
+      run: |
+        set -euo pipefail
+        echo "::group::Deploying to ${NETWORK} (simulate-only)"
+
+        WASM_PATH=$(find target/wasm32-unknown-unknown/release -maxdepth 1 \
+          -name "*-opt.wasm" | sort | tail -1)
+
+        if [[ -z "${WASM_PATH}" ]]; then
+          echo "::error::No optimised .wasm found. Ensure run-build is 'true' before deploying."
+          exit 1
+        fi
+
+        echo "Deploying: ${WASM_PATH}"
+
+        TX_ID=$(stellar contract deploy \
+          --wasm "${WASM_PATH}" \
+          --source "${SOURCE_ACCOUNT}" \
+          --network-passphrase "${PASSPHRASE}" \
+          --rpc-url "${RPC_URL}" \
+          --simulate-only \
+          2>&1 | tee /dev/stderr | grep -oE '[0-9a-f]{64}' | head -1 || true)
+
+        echo "tx-id=${TX_ID}" >> "${GITHUB_OUTPUT}"
+        echo "Simulation TX ID: ${TX_ID}"
+        echo "::endgroup::"

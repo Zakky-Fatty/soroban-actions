@@ -1,0 +1,26 @@
+[package]
+name    = "dummy-contract"
+version = "0.1.0"
+edition = "2021"
+description = "Dummy Soroban contract – used to dogfood soroban-actions."
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { version = "21", features = [] }
+
+[dev-dependencies]
+soroban-sdk = { version = "21", features = ["testutils"] }
+
+[profile.release]
+opt-level    = "z"   # optimise for size
+overflow-checks = true
+debug        = false
+strip        = "symbols"
+lto          = true
+codegen-units = 1
+
+[profile.release.build-override]
+opt-level = 3

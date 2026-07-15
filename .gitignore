@@ -1,0 +1,28 @@
+# ── Rust / Cargo ─────────────────────────────────────────────
+/target/
+dummy-contract/target/
+**/*.rs.bk
+Cargo.lock           # intentionally excluded for libraries / actions
+
+# ── Compiled artefacts ────────────────────────────────────────
+**/*.wasm
+**/*-opt.wasm
+
+# ── OS / Editor ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Secrets / Environment ─────────────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+
+# ── Node / npm (tooling) ──────────────────────────────────────
+node_modules/
+dist/
